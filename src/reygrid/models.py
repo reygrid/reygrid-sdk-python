@@ -184,6 +184,7 @@ class Message:
     createdAt: str
     content: Optional[str] = None
     tool_calls: Optional[List[MessageToolCall]] = None
+    feedback: Optional["Feedback"] = None
 
 
 @dataclass
@@ -250,6 +251,229 @@ class ChatDeltaEvent:
     delta: Optional[ChatDelta] = None
     usage: Optional[ChatUsage] = None
     raw: Optional[Dict[str, Any]] = None
+
+
+# ---------------------------------------------------------------------------
+# Agents
+# ---------------------------------------------------------------------------
+
+SourceType = Literal["text", "qa", "file", "website"]
+
+
+@dataclass
+class Agent:
+    id: str
+    name: str
+    model: str
+    instructions: str
+    usage: float = 0
+    """Credits spent by the agent so far."""
+    createdAt: Optional[str] = None
+
+
+@dataclass
+class AgentStorage:
+    used: int
+    """Characters of text plus bytes of files."""
+    limit: int
+
+
+@dataclass
+class AgentDetail(Agent):
+    sources: Dict[str, int] = field(default_factory=dict)
+    """Number of sources per type: text, qa, file, website."""
+    storage: Optional[AgentStorage] = None
+
+
+@dataclass
+class AgentsResponse:
+    success: bool
+    agents: List[Agent] = field(default_factory=list)
+
+
+@dataclass
+class AgentResponse:
+    success: bool
+    agent: Optional[Agent] = None
+
+
+@dataclass
+class AgentDetailResponse:
+    success: bool
+    agent: Optional[AgentDetail] = None
+
+
+# ---------------------------------------------------------------------------
+# Knowledge sources
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Source:
+    id: str
+    type: SourceType
+    title: str
+    """The title, question, file name or page URL."""
+    content: Optional[str] = None
+    """Text or answer. Only for text and qa sources."""
+    size: Optional[int] = None
+    """File size in bytes. Only for file sources."""
+    createdAt: Optional[str] = None
+
+
+@dataclass
+class SourcesPagination(Pagination):
+    totalSources: int = 0
+
+
+@dataclass
+class SourcesResponse:
+    success: bool
+    sources: List[Source] = field(default_factory=list)
+    pagination: Optional[SourcesPagination] = None
+
+
+@dataclass
+class CreatedSource:
+    id: str
+    type: SourceType
+    title: str
+    size: Optional[int] = None
+
+
+@dataclass
+class SourceCreatedResponse:
+    success: bool
+    source: Optional[CreatedSource] = None
+
+
+@dataclass
+class CrawledPage:
+    id: str
+    path: str
+
+
+@dataclass
+class CrawlResponse:
+    success: bool
+    pagesCrawled: int = 0
+    pages: List[CrawledPage] = field(default_factory=list)
+
+
+@dataclass
+class DeleteSourceResponse:
+    success: bool
+    deleted: bool = False
+
+
+# ---------------------------------------------------------------------------
+# Search
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SearchSource:
+    id: str
+    type: SourceType
+    title: str
+
+
+@dataclass
+class SearchResult:
+    score: float
+    """Similarity between 0 and 1. Higher is closer."""
+    content: str
+    source: Optional[SearchSource] = None
+
+
+@dataclass
+class SearchResponse:
+    success: bool
+    results: List[SearchResult] = field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# Feedback
+# ---------------------------------------------------------------------------
+
+FeedbackRating = Literal["up", "down"]
+
+
+@dataclass
+class Feedback:
+    rating: FeedbackRating
+    comment: Optional[str] = None
+    createdAt: Optional[str] = None
+
+
+@dataclass
+class FeedbackResponse:
+    success: bool
+    feedback: Optional[Feedback] = None
+
+
+# ---------------------------------------------------------------------------
+# Models & usage
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Model:
+    id: str
+    name: str
+    provider: str
+    pricing: float
+    """Credits per message."""
+    available: bool
+    """Whether your plan can use the model."""
+
+
+@dataclass
+class ModelsResponse:
+    success: bool
+    models: List[Model] = field(default_factory=list)
+
+
+@dataclass
+class UsageBalance:
+    credits: float
+    plan: str
+    renewsAt: Optional[str] = None
+
+
+@dataclass
+class UsagePeriod:
+    days: int
+    to: str
+    from_: Optional[str] = None
+
+
+@dataclass
+class UsageTotals:
+    requests: int = 0
+    failed: int = 0
+    credits: float = 0
+
+
+@dataclass
+class UsageDay(UsageTotals):
+    date: str = ""
+
+
+@dataclass
+class UsageAgent:
+    id: str
+    requests: int
+    credits: float
+    name: Optional[str] = None
+    """None when the agent was deleted."""
+
+
+@dataclass
+class UsageReport:
+    success: bool
+    balance: Optional[UsageBalance] = None
+    period: Optional[UsagePeriod] = None
+    totals: Optional[UsageTotals] = None
+    daily: List[UsageDay] = field(default_factory=list)
+    agents: List[UsageAgent] = field(default_factory=list)
 
 
 def _parse_dataclass(cls, data: Optional[Dict[str, Any]]) -> Any:

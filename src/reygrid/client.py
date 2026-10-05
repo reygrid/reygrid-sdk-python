@@ -9,8 +9,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, TypeVar
+from typing import Any, AsyncIterator, BinaryIO, Dict, Iterator, List, Optional, TypeVar, Union
 
 import httpx
 
@@ -21,7 +23,20 @@ from .exceptions import (
     map_api_error,
 )
 from .models import (
+    AgentDetailResponse,
+    AgentResponse,
+    AgentsResponse,
     CancelToolResponse,
+    CrawlResponse,
+    DeleteSourceResponse,
+    FeedbackRating,
+    FeedbackResponse,
+    ModelsResponse,
+    SearchResponse,
+    SourceCreatedResponse,
+    SourcesResponse,
+    SourceType,
+    UsageReport,
     ChatDeltaEvent,
     ChatRequest,
     ChatResponse,
@@ -42,6 +57,8 @@ from .sse import _extract_events, _parse_delta, parse_sse_stream
 log = logging.getLogger("reygrid")
 
 DEFAULT_BASE_URL = "https://reygrid.com/api/v1"
+LONG_TIMEOUT = 600.0
+"""File uploads and website crawls are indexed before the API responds."""
 T = TypeVar("T")
 
 
@@ -197,10 +214,7 @@ class ReyGrid:
         )
 
     def _default_headers(self) -> Dict[str, str]:
-        h: Dict[str, str] = {
-            "Accept": "application/json",
-            "Content-Type": "application/json",
-        }
+        h: Dict[str, str] = {"Accept": "application/json"}
         h.update(self.headers)
         if self.api_key:
             h["Authorization"] = f"Bearer {self.api_key}"
@@ -321,7 +335,7 @@ class ReyGrid:
         return _parse_dataclass(ValidateResponse, data)
 
     def get_usage(self) -> Usage:
-        """Convenience: resolve the current usage/quota (sync)."""
+        """Convenience: usage/quota of this API key (sync). For account usage see get_usage_report()."""
         return self.validate().usage
 
     async def async_get_usage(self) -> Usage:
@@ -502,13 +516,11 @@ class ReyGrid:
 
     def paginate_conversations(self, agent_id: str, size: int = 20) -> Paginator:
         """Paginate through all of an agent's conversations (sync/async iterator)."""
-        return Paginator(
-            lambda p, s: PaginatedResult(
-                data=self.list_conversations(agent_id, page=p, size=s).conversations,
-                pagination=self.list_conversations(agent_id, page=p, size=s).pagination,
-            ),
-            size,
-        )
+        def _fetcher(p: int, s: int) -> PaginatedResult:
+            resp = self.list_conversations(agent_id, page=p, size=s)
+            return PaginatedResult(data=resp.conversations, pagination=resp.pagination)
+
+        return Paginator(_fetcher, size)
 
     def async_paginate_conversations(self, agent_id: str, size: int = 20) -> Paginator:
         """Paginate through all conversations (async iterator)."""
@@ -559,13 +571,11 @@ class ReyGrid:
 
     def paginate_messages(self, agent_id: str, conversation_ref: str, size: int = 20) -> Paginator:
         """Paginate through all messages of a conversation (sync/async iterator)."""
-        return Paginator(
-            lambda p, s: PaginatedResult(
-                data=self.list_messages(agent_id, conversation_ref, page=p, size=s).messages,
-                pagination=self.list_messages(agent_id, conversation_ref, page=p, size=s).pagination,
-            ),
-            size,
-        )
+        def _fetcher(p: int, s: int) -> PaginatedResult:
+            resp = self.list_messages(agent_id, conversation_ref, page=p, size=s)
+            return PaginatedResult(data=resp.messages, pagination=resp.pagination)
+
+        return Paginator(_fetcher, size)
 
     def async_paginate_messages(self, agent_id: str, conversation_ref: str, size: int = 20) -> Paginator:
         """Paginate through all messages (async iterator)."""
@@ -661,6 +671,332 @@ class ReyGrid:
         )
         data = res.json()
         return _parse_dataclass(CancelToolResponse, data)
+
+    # ------------------------------------------------------------------
+    # Agents
+    # ------------------------------------------------------------------
+
+    def list_agents(self) -> AgentsResponse:
+        """List the agents this API key can use (sync)."""
+        return _parse_dataclass(AgentsResponse, self._request_sync("GET", "/agents").json())
+
+    async def async_list_agents(self) -> AgentsResponse:
+        """List the agents this API key can use (async)."""
+        res = await self._request_async("GET", "/agents")
+        return _parse_dataclass(AgentsResponse, res.json())
+
+    def get_agent(self, agent_id: str) -> AgentDetailResponse:
+        """Get an agent with its source counts and storage usage (sync)."""
+        res = self._request_sync("GET", f"/agents/{_esc(agent_id)}")
+        return _parse_dataclass(AgentDetailResponse, res.json())
+
+    async def async_get_agent(self, agent_id: str) -> AgentDetailResponse:
+        """Get an agent (async)."""
+        res = await self._request_async("GET", f"/agents/{_esc(agent_id)}")
+        return _parse_dataclass(AgentDetailResponse, res.json())
+
+    def update_agent(
+        self,
+        agent_id: str,
+        *,
+        name: Optional[str] = None,
+        instructions: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> AgentResponse:
+        """Update an agent's name, instructions or model (sync)."""
+        body = _without_none(name=name, instructions=instructions, model=model)
+        res = self._request_sync("PATCH", f"/agents/{_esc(agent_id)}", json=body)
+        return _parse_dataclass(AgentResponse, res.json())
+
+    async def async_update_agent(
+        self,
+        agent_id: str,
+        *,
+        name: Optional[str] = None,
+        instructions: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> AgentResponse:
+        """Update an agent (async)."""
+        body = _without_none(name=name, instructions=instructions, model=model)
+        res = await self._request_async("PATCH", f"/agents/{_esc(agent_id)}", json=body)
+        return _parse_dataclass(AgentResponse, res.json())
+
+    # ------------------------------------------------------------------
+    # Knowledge sources
+    # ------------------------------------------------------------------
+
+    def list_sources(
+        self,
+        agent_id: str,
+        *,
+        type: Optional[SourceType] = None,
+        search: Optional[str] = None,
+        page: int = 1,
+        size: int = 20,
+    ) -> SourcesResponse:
+        """List an agent's knowledge sources, newest first (sync)."""
+        params = _without_none(type=type, search=search, page=page, size=min(size, 100))
+        res = self._request_sync("GET", f"/agents/{_esc(agent_id)}/sources", params=params)
+        return _parse_dataclass(SourcesResponse, res.json())
+
+    async def async_list_sources(
+        self,
+        agent_id: str,
+        *,
+        type: Optional[SourceType] = None,
+        search: Optional[str] = None,
+        page: int = 1,
+        size: int = 20,
+    ) -> SourcesResponse:
+        """List an agent's knowledge sources (async)."""
+        params = _without_none(type=type, search=search, page=page, size=min(size, 100))
+        res = await self._request_async("GET", f"/agents/{_esc(agent_id)}/sources", params=params)
+        return _parse_dataclass(SourcesResponse, res.json())
+
+    def paginate_sources(
+        self,
+        agent_id: str,
+        *,
+        type: Optional[SourceType] = None,
+        search: Optional[str] = None,
+        size: int = 20,
+    ) -> Paginator:
+        """Iterate over all of an agent's sources, page by page (sync)."""
+
+        def _fetcher(p: int, s: int) -> PaginatedResult:
+            resp = self.list_sources(agent_id, type=type, search=search, page=p, size=s)
+            return PaginatedResult(data=resp.sources, pagination=resp.pagination)
+
+        return Paginator(_fetcher, size)
+
+    def async_paginate_sources(
+        self,
+        agent_id: str,
+        *,
+        type: Optional[SourceType] = None,
+        search: Optional[str] = None,
+        size: int = 20,
+    ) -> Paginator:
+        """Iterate over all of an agent's sources (async)."""
+
+        async def _fetcher(p: int, s: int) -> PaginatedResult:
+            resp = await self.async_list_sources(agent_id, type=type, search=search, page=p, size=s)
+            return PaginatedResult(data=resp.sources, pagination=resp.pagination)
+
+        return Paginator(_fetcher, size)
+
+    def add_text_source(self, agent_id: str, title: str, content: str) -> SourceCreatedResponse:
+        """Add a titled piece of text (sync)."""
+        res = self._request_sync(
+            "POST", f"/agents/{_esc(agent_id)}/sources/text", json={"title": title, "content": content}
+        )
+        return _parse_dataclass(SourceCreatedResponse, res.json())
+
+    async def async_add_text_source(self, agent_id: str, title: str, content: str) -> SourceCreatedResponse:
+        """Add a titled piece of text (async)."""
+        res = await self._request_async(
+            "POST", f"/agents/{_esc(agent_id)}/sources/text", json={"title": title, "content": content}
+        )
+        return _parse_dataclass(SourceCreatedResponse, res.json())
+
+    def add_qa_source(self, agent_id: str, question: str, answer: str) -> SourceCreatedResponse:
+        """Add a question and its exact answer (sync)."""
+        res = self._request_sync(
+            "POST", f"/agents/{_esc(agent_id)}/sources/qa", json={"question": question, "answer": answer}
+        )
+        return _parse_dataclass(SourceCreatedResponse, res.json())
+
+    async def async_add_qa_source(self, agent_id: str, question: str, answer: str) -> SourceCreatedResponse:
+        """Add a question and its exact answer (async)."""
+        res = await self._request_async(
+            "POST", f"/agents/{_esc(agent_id)}/sources/qa", json={"question": question, "answer": answer}
+        )
+        return _parse_dataclass(SourceCreatedResponse, res.json())
+
+    def upload_file(
+        self,
+        agent_id: str,
+        file: Union[str, "os.PathLike[str]", bytes, BinaryIO],
+        filename: Optional[str] = None,
+        *,
+        content_type: Optional[str] = None,
+        timeout: float = LONG_TIMEOUT,
+    ) -> SourceCreatedResponse:
+        """Upload a PDF, DOC, DOCX or TXT file, up to 30 MB (sync).
+
+        ``file`` is a path, raw bytes or an open binary file.
+        """
+        with _file_part(file, filename, content_type) as part:
+            res = self._request_sync(
+                "POST", f"/agents/{_esc(agent_id)}/sources/files", files={"file": part}, timeout=timeout
+            )
+        return _parse_dataclass(SourceCreatedResponse, res.json())
+
+    async def async_upload_file(
+        self,
+        agent_id: str,
+        file: Union[str, "os.PathLike[str]", bytes, BinaryIO],
+        filename: Optional[str] = None,
+        *,
+        content_type: Optional[str] = None,
+        timeout: float = LONG_TIMEOUT,
+    ) -> SourceCreatedResponse:
+        """Upload a file (async)."""
+        with _file_part(file, filename, content_type) as part:
+            res = await self._request_async(
+                "POST", f"/agents/{_esc(agent_id)}/sources/files", files={"file": part}, timeout=timeout
+            )
+        return _parse_dataclass(SourceCreatedResponse, res.json())
+
+    def crawl_website(self, agent_id: str, url: str, *, timeout: float = LONG_TIMEOUT) -> CrawlResponse:
+        """Crawl a website and index its pages. Returns when the crawl is done (sync)."""
+        res = self._request_sync(
+            "POST", f"/agents/{_esc(agent_id)}/sources/website", json={"url": url}, timeout=timeout
+        )
+        return _parse_dataclass(CrawlResponse, res.json())
+
+    async def async_crawl_website(self, agent_id: str, url: str, *, timeout: float = LONG_TIMEOUT) -> CrawlResponse:
+        """Crawl a website (async)."""
+        res = await self._request_async(
+            "POST", f"/agents/{_esc(agent_id)}/sources/website", json={"url": url}, timeout=timeout
+        )
+        return _parse_dataclass(CrawlResponse, res.json())
+
+    def delete_source(self, agent_id: str, source_id: str) -> DeleteSourceResponse:
+        """Delete a source and everything indexed from it (sync)."""
+        res = self._request_sync("DELETE", f"/agents/{_esc(agent_id)}/sources/{_esc(source_id)}")
+        return _parse_dataclass(DeleteSourceResponse, res.json())
+
+    async def async_delete_source(self, agent_id: str, source_id: str) -> DeleteSourceResponse:
+        """Delete a source (async)."""
+        res = await self._request_async("DELETE", f"/agents/{_esc(agent_id)}/sources/{_esc(source_id)}")
+        return _parse_dataclass(DeleteSourceResponse, res.json())
+
+    # ------------------------------------------------------------------
+    # Search
+    # ------------------------------------------------------------------
+
+    def search(self, agent_id: str, query: str, *, limit: int = 5) -> SearchResponse:
+        """The knowledge passages closest to ``query``, without generating an answer (sync)."""
+        res = self._request_sync(
+            "POST", f"/agents/{_esc(agent_id)}/search", json={"query": query, "limit": limit}
+        )
+        return _parse_dataclass(SearchResponse, res.json())
+
+    async def async_search(self, agent_id: str, query: str, *, limit: int = 5) -> SearchResponse:
+        """Search an agent's knowledge (async)."""
+        res = await self._request_async(
+            "POST", f"/agents/{_esc(agent_id)}/search", json={"query": query, "limit": limit}
+        )
+        return _parse_dataclass(SearchResponse, res.json())
+
+    # ------------------------------------------------------------------
+    # Feedback
+    # ------------------------------------------------------------------
+
+    def rate_message(
+        self,
+        agent_id: str,
+        conversation_ref: str,
+        message_id: str,
+        rating: FeedbackRating,
+        comment: Optional[str] = None,
+    ) -> FeedbackResponse:
+        """Rate an assistant reply ``"up"`` or ``"down"`` (sync). Replaces any previous rating."""
+        res = self._request_sync(
+            "POST",
+            f"/agents/{_esc(agent_id)}/conversations/{_esc(conversation_ref)}/messages/{_esc(message_id)}/feedback",
+            json=_without_none(rating=rating, comment=comment),
+        )
+        return _parse_dataclass(FeedbackResponse, res.json())
+
+    async def async_rate_message(
+        self,
+        agent_id: str,
+        conversation_ref: str,
+        message_id: str,
+        rating: FeedbackRating,
+        comment: Optional[str] = None,
+    ) -> FeedbackResponse:
+        """Rate an assistant reply (async)."""
+        res = await self._request_async(
+            "POST",
+            f"/agents/{_esc(agent_id)}/conversations/{_esc(conversation_ref)}/messages/{_esc(message_id)}/feedback",
+            json=_without_none(rating=rating, comment=comment),
+        )
+        return _parse_dataclass(FeedbackResponse, res.json())
+
+    # ------------------------------------------------------------------
+    # Models & usage
+    # ------------------------------------------------------------------
+
+    def list_models(self) -> ModelsResponse:
+        """Every model, its price per message and whether your plan can use it (sync)."""
+        return _parse_dataclass(ModelsResponse, self._request_sync("GET", "/models").json())
+
+    async def async_list_models(self) -> ModelsResponse:
+        """List models (async)."""
+        res = await self._request_async("GET", "/models")
+        return _parse_dataclass(ModelsResponse, res.json())
+
+    def get_usage_report(self, days: int = 30) -> UsageReport:
+        """Credit balance and API usage over the last ``days`` days, 1-90 (sync)."""
+        res = self._request_sync("GET", "/usage", params={"days": days})
+        return _parse_usage(res.json())
+
+    async def async_get_usage_report(self, days: int = 30) -> UsageReport:
+        """Credit balance and API usage (async)."""
+        res = await self._request_async("GET", "/usage", params={"days": days})
+        return _parse_usage(res.json())
+
+
+def _without_none(**values: Any) -> Dict[str, Any]:
+    return {k: v for k, v in values.items() if v is not None}
+
+
+def _parse_usage(data: Dict[str, Any]) -> UsageReport:
+    # "from" is a Python keyword: exposed as ``period.from_``.
+    period = data.get("period")
+    if isinstance(period, dict) and "from" in period:
+        data = {**data, "period": {**{k: v for k, v in period.items() if k != "from"}, "from_": period["from"]}}
+    return _parse_dataclass(UsageReport, data)
+
+
+_CONTENT_TYPES = {
+    ".pdf": "application/pdf",
+    ".txt": "text/plain",
+    ".doc": "application/msword",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+}
+
+
+@contextmanager
+def _file_part(
+    file: Union[str, "os.PathLike[str]", bytes, BinaryIO],
+    filename: Optional[str],
+    content_type: Optional[str],
+):
+    """A ``(filename, file, content_type)`` tuple for httpx; opens paths for the upload."""
+    opened = None
+    if isinstance(file, (str, os.PathLike)):
+        path = os.fspath(file)
+        filename = filename or os.path.basename(path)
+        opened = open(path, "rb")
+        content = opened
+    else:
+        content = file
+        filename = filename or os.path.basename(getattr(file, "name", "") or "") or None
+    if not filename:
+        if opened:
+            opened.close()
+        raise ValueError("filename is required when uploading bytes or a stream")
+
+    ext = os.path.splitext(filename)[1].lower()
+    try:
+        yield (filename, content, content_type or _CONTENT_TYPES.get(ext, "application/octet-stream"))
+    finally:
+        if opened:
+            opened.close()
 
 
 def _esc(s: str) -> str:

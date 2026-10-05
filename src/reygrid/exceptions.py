@@ -67,6 +67,21 @@ class ReyGridConflictError(ReyGridApiError):
         super().__init__(409, body)
 
 
+class ReyGridPermissionError(ReyGridApiError):
+    """Thrown when the request isn't allowed (403): plan limit reached, model not
+    on your plan, or an API key restricted to other agents or IP addresses."""
+
+    def __init__(self, body: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(403, body)
+
+
+class ReyGridRateLimitError(ReyGridApiError):
+    """Thrown when you're rate limited or the key's quota is used up (429)."""
+
+    def __init__(self, body: Optional[Dict[str, Any]] = None) -> None:
+        super().__init__(429, body)
+
+
 class ReyGridNetworkError(ReyGridError):
     """Thrown on network-level failures (timeout, DNS, connection refused)."""
 
@@ -77,6 +92,11 @@ class ReyGridStreamError(ReyGridError):
 
 def map_api_error(status: int, body: Any) -> ReyGridApiError:
     """Map an HTTP status code and parsed body to the correct error type."""
+    # Most errors are {"success": false, "error": {"code", "message"}}; 401s are {"error", "code"}.
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        body = body["error"]
+    elif isinstance(body, dict) and isinstance(body.get("error"), str):
+        body = {"message": body["error"], **body}
     if status == 401:
         return ReyGridAuthError(body)
     if status == 400:
@@ -85,4 +105,8 @@ def map_api_error(status: int, body: Any) -> ReyGridApiError:
         return ReyGridNotFoundError(body)
     if status == 409:
         return ReyGridConflictError(body)
+    if status == 403:
+        return ReyGridPermissionError(body)
+    if status == 429:
+        return ReyGridRateLimitError(body)
     return ReyGridApiError(status, body)
