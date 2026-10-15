@@ -163,7 +163,7 @@ client.update_agent("agent-id", instructions="Answer in a friendly tone.")
 client.add_text_source("agent-id", "Refund policy", "Orders can be refunded within 30 days of delivery.")
 client.add_qa_source("agent-id", "Do you ship abroad?", "Yes, to 40 countries. Delivery takes 5 to 10 days.")
 
-# PDF, DOC, DOCX or TXT, up to 30 MB: a path, bytes or an open binary file
+# PDF, DOC, DOCX or TXT: a path, bytes or an open binary file
 client.upload_file("agent-id", "handbook.pdf")
 
 # Crawls pages on the same domain; returns when done

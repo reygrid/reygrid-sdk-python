@@ -822,7 +822,7 @@ class ReyGrid:
         content_type: Optional[str] = None,
         timeout: float = LONG_TIMEOUT,
     ) -> SourceCreatedResponse:
-        """Upload a PDF, DOC, DOCX or TXT file, up to 30 MB (sync).
+        """Upload a PDF, DOC, DOCX or TXT file (sync).
 
         ``file`` is a path, raw bytes or an open binary file.
         """
